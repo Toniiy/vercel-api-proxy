@@ -2,14 +2,14 @@
   "name": "oebb-vercel-proxy",
   "version": "1.0.0",
   "description": "ÖBB train data proxy for Vercel serverless",
+  "type": "module",
   "scripts": {
-    "dev": "vercel dev",
-    "build": "echo 'No build needed for serverless'"
+    "dev": "vercel dev"
   },
   "dependencies": {
     "axios": "^1.6.2"
   },
   "engines": {
-    "node": "18.x"
+    "node": "22.x"
   }
 }
