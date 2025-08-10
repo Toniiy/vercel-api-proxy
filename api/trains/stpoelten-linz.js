@@ -21,23 +21,49 @@ async function fetchOebbTransportRest(fromStation, toStation) {
       toId = '8100008';   // St. Pölten Hbf
     }
     
-    const apiUrl = `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`;
-    console.log(`🌐 ÖBB Transport REST API: ${apiUrl}`);
+    // Try multiple APIs in order
+    const apis = [
+      `https://v6.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`,
+      `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`,
+      `https://v5.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`
+    ];
     
-    const response = await axios.get(apiUrl, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 15000
-    });
+    let response = null;
+    let apiUsed = '';
+    
+    for (const apiUrl of apis) {
+      try {
+        console.log(`🌐 Trying API: ${apiUrl}`);
+        response = await axios.get(apiUrl, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 10000
+        });
+        
+        if (response.data && (response.data.journeys || response.data.routes)) {
+          apiUsed = apiUrl;
+          console.log(`✅ API success: ${apiUrl}`);
+          break;
+        }
+      } catch (err) {
+        console.log(`❌ API failed: ${apiUrl} - ${err.message}`);
+        continue;
+      }
+    }
+    
+    if (!response) {
+      throw new Error('All APIs failed');
+    }
     
     console.log(`📨 API response: ${response.data ? JSON.stringify(response.data).length : 0} chars`);
     
-    if (response.data && response.data.journeys) {
-      const trains = parseTransportRestData(response.data.journeys);
+    if (response.data && (response.data.journeys || response.data.routes)) {
+      const journeys = response.data.journeys || response.data.routes || [];
+      const trains = parseTransportRestData(journeys, apiUsed);
       if (trains && trains.length > 0) {
-        console.log(`✅ Successfully parsed ${trains.length} real trains`);
+        console.log(`✅ Successfully parsed ${trains.length} real trains from ${apiUsed}`);
         return trains;
       }
     }
@@ -222,13 +248,11 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error(`❌ Transport REST API failed: ${error.message}`);
     
-    const fallbackData = getRealisticFallback('St. Pölten', 'Linz');
-    
-    res.status(200).json({
+    res.status(500).json({
       route: "St. Pölten → Linz",
       timestamp: new Date().toISOString(),
-      trains: fallbackData,
-      source: 'realistic-fallback-vercel',
+      trains: [],
+      source: 'none - all APIs failed',
       realTimeData: false,
       success: false,
       error: error.message

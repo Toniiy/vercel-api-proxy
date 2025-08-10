@@ -21,23 +21,49 @@ async function fetchOebbTransportRest(fromStation, toStation) {
       toId = '8100008';   // St. Pölten Hbf
     }
     
-    const apiUrl = `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`;
-    console.log(`🌐 ÖBB Transport REST API: ${apiUrl}`);
+    // Try multiple APIs in order
+    const apis = [
+      `https://v6.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`,
+      `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`,
+      `https://v5.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`
+    ];
     
-    const response = await axios.get(apiUrl, {
-      headers: {
-        'Accept': 'application/json',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      },
-      timeout: 15000
-    });
+    let response = null;
+    let apiUsed = '';
+    
+    for (const apiUrl of apis) {
+      try {
+        console.log(`🌐 Trying API: ${apiUrl}`);
+        response = await axios.get(apiUrl, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+          },
+          timeout: 10000
+        });
+        
+        if (response.data && (response.data.journeys || response.data.routes)) {
+          apiUsed = apiUrl;
+          console.log(`✅ API success: ${apiUrl}`);
+          break;
+        }
+      } catch (err) {
+        console.log(`❌ API failed: ${apiUrl} - ${err.message}`);
+        continue;
+      }
+    }
+    
+    if (!response) {
+      throw new Error('All APIs failed');
+    }
     
     console.log(`📨 API response: ${response.data ? JSON.stringify(response.data).length : 0} chars`);
     
-    if (response.data && response.data.journeys) {
-      const trains = parseTransportRestData(response.data.journeys);
+    if (response.data && (response.data.journeys || response.data.routes)) {
+      const journeys = response.data.journeys || response.data.routes || [];
+      const trains = parseTransportRestData(journeys, apiUsed);
       if (trains && trains.length > 0) {
-        console.log(`✅ Successfully parsed ${trains.length} real trains`);
+        console.log(`✅ Successfully parsed ${trains.length} real trains from ${apiUsed}`);
         return trains;
       }
     }
@@ -131,34 +157,34 @@ function getRealisticFallback(fromStation, toStation) {
   
   const trains = [];
   
-  if (fromStation === 'Linz' && toStation === 'St. Pölten') {
-    // Linz → St. Pölten schedule
+  if (fromStation === 'St. Pölten' && toStation === 'Linz') {
+    // St. Pölten → Linz schedule
     const baseSchedule = [
-      { hour: 6, minute: 7, type: 'RJ', number: 'RJ 541' },
-      { hour: 7, minute: 7, type: 'RJ', number: 'RJ 543' },
-      { hour: 8, minute: 7, type: 'RJ', number: 'RJ 545' },
-      { hour: 9, minute: 7, type: 'RJ', number: 'RJ 547' },
-      { hour: 10, minute: 7, type: 'RJ', number: 'RJ 549' },
-      { hour: 11, minute: 7, type: 'RJ', number: 'RJ 551' },
-      { hour: 12, minute: 7, type: 'RJ', number: 'RJ 553' },
-      { hour: 12, minute: 37, type: 'WB', number: 'WB 8653' },
-      { hour: 13, minute: 7, type: 'RJ', number: 'RJ 555' },
-      { hour: 13, minute: 37, type: 'WB', number: 'WB 8655' },
-      { hour: 14, minute: 7, type: 'RJ', number: 'RJ 557' },
-      { hour: 14, minute: 37, type: 'WB', number: 'WB 8657' },
-      { hour: 15, minute: 7, type: 'RJ', number: 'RJ 559' },
-      { hour: 15, minute: 37, type: 'WB', number: 'WB 8659' },
-      { hour: 16, minute: 7, type: 'RJ', number: 'RJ 561' },
-      { hour: 16, minute: 37, type: 'WB', number: 'WB 8661' },
-      { hour: 17, minute: 7, type: 'RJ', number: 'RJ 563' },
-      { hour: 17, minute: 37, type: 'WB', number: 'WB 8663' },
-      { hour: 18, minute: 7, type: 'RJ', number: 'RJ 565' },
-      { hour: 18, minute: 37, type: 'WB', number: 'WB 8665' },
-      { hour: 19, minute: 7, type: 'RJ', number: 'RJ 567' },
-      { hour: 19, minute: 37, type: 'WB', number: 'WB 8667' },
-      { hour: 20, minute: 7, type: 'RJ', number: 'RJ 569' },
-      { hour: 21, minute: 7, type: 'RJ', number: 'RJ 571' },
-      { hour: 22, minute: 7, type: 'RJ', number: 'RJ 573' }
+      { hour: 6, minute: 42, type: 'RJ', number: 'RJ 540' },
+      { hour: 7, minute: 42, type: 'RJ', number: 'RJ 542' },
+      { hour: 8, minute: 42, type: 'RJ', number: 'RJ 544' },
+      { hour: 9, minute: 42, type: 'RJ', number: 'RJ 546' },
+      { hour: 10, minute: 42, type: 'RJ', number: 'RJ 548' },
+      { hour: 11, minute: 42, type: 'RJ', number: 'RJ 550' },
+      { hour: 12, minute: 12, type: 'WB', number: 'WB 8652' },
+      { hour: 12, minute: 42, type: 'RJ', number: 'RJ 552' },
+      { hour: 13, minute: 12, type: 'WB', number: 'WB 8654' },
+      { hour: 13, minute: 42, type: 'RJ', number: 'RJ 554' },
+      { hour: 14, minute: 12, type: 'WB', number: 'WB 8656' },
+      { hour: 14, minute: 42, type: 'RJ', number: 'RJ 556' },
+      { hour: 15, minute: 42, type: 'RJ', number: 'RJ 558' },
+      { hour: 16, minute: 12, type: 'WB', number: 'WB 8658' },
+      { hour: 16, minute: 42, type: 'RJ', number: 'RJ 560' },
+      { hour: 17, minute: 12, type: 'WB', number: 'WB 8660' },
+      { hour: 17, minute: 42, type: 'RJ', number: 'RJ 562' },
+      { hour: 18, minute: 12, type: 'WB', number: 'WB 8662' },
+      { hour: 18, minute: 42, type: 'RJ', number: 'RJ 564' },
+      { hour: 19, minute: 12, type: 'WB', number: 'WB 8664' },
+      { hour: 19, minute: 42, type: 'RJ', number: 'RJ 566' },
+      { hour: 20, minute: 12, type: 'WB', number: 'WB 8666' },
+      { hour: 20, minute: 42, type: 'RJ', number: 'RJ 568' },
+      { hour: 21, minute: 42, type: 'RJ', number: 'RJ 570' },
+      { hour: 22, minute: 42, type: 'RJ', number: 'RJ 572' }
     ];
     
     for (const schedule of baseSchedule) {
@@ -181,7 +207,7 @@ function getRealisticFallback(fromStation, toStation) {
           trainNumber: schedule.number,
           delay: delay,
           status: delay > 0 ? 'delayed' : 'on-time',
-          platform: schedule.type === 'WB' ? '3' : '4'
+          platform: schedule.type === 'WB' ? '1' : '2'
         });
         
         console.log(`🚂 Fallback: ${schedule.number} ${departureTime} (${delay}min delay)`);
@@ -222,13 +248,11 @@ export default async function handler(req, res) {
   } catch (error) {
     console.error(`❌ Transport REST API failed: ${error.message}`);
     
-    const fallbackData = getRealisticFallback('Linz', 'St. Pölten');
-    
-    res.status(200).json({
+    res.status(500).json({
       route: "Linz → St. Pölten",
       timestamp: new Date().toISOString(),
-      trains: fallbackData,
-      source: 'realistic-fallback-vercel',
+      trains: [],
+      source: 'none - all APIs failed',
       realTimeData: false,
       success: false,
       error: error.message
