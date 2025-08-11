@@ -112,7 +112,32 @@ function parseTransportRestData(journeys) {
       const trainType = leg.line.productName || 'RJ';
       const trainNumber = leg.line.name || `${trainType} ???`;
       
-      const platform = leg.departurePlatform || '?';
+      // Try multiple platform fields - WB trains might use different field names
+      const platform = leg.departurePlatform || 
+                      leg.arrivalPlatform || 
+                      leg.platform || 
+                      (leg.departure && leg.departure.platform) ||
+                      (leg.arrival && leg.arrival.platform) ||
+                      (leg.departure && leg.departure.plannedPlatform) ||
+                      (leg.arrival && leg.arrival.plannedPlatform) ||
+                      '?';
+      
+      // Debug logging for WB trains to see what platform data is available
+      if (trainType === 'WB' && platform === '?') {
+        console.log(`🔍 WB Debug - Available fields:`, {
+          departurePlatform: leg.departurePlatform,
+          arrivalPlatform: leg.arrivalPlatform, 
+          platform: leg.platform,
+          departure: leg.departure ? {
+            platform: leg.departure.platform,
+            plannedPlatform: leg.departure.plannedPlatform
+          } : null,
+          arrival: leg.arrival ? {
+            platform: leg.arrival.platform,
+            plannedPlatform: leg.arrival.plannedPlatform
+          } : null
+        });
+      }
       
       trains.push({
         departure: departureTime,
