@@ -22,7 +22,14 @@ async function fetchOebbTransportRest(fromStation, toStation) {
     }
     
     // Try multiple APIs in order
+    // Enhanced API priority: try ÖBB endpoints first for better Westbahn platform data
+    const currentDate = new Date().toISOString().split('T')[0].replace(/-/g, ''); // YYYYMMDD
+    const currentTime = new Date().toTimeString().split(' ')[0].substring(0,5).replace(':', ''); // HHMM
+    
     const apis = [
+      // Try direct ÖBB Scotty API for better WB data
+      `https://fahrplan.oebb.at/bin/query.exe/dny?S=St.+P%C3%B6lten+Hbf&Z=Linz+Hbf&date=${currentDate}&time=${currentTime}&start=1&prod=1111111111111111&REQ0JourneyStopsS0A=1&REQ0JourneyStopsZ0A=1&output=json`,
+      // Fallback to transport.rest APIs
       `https://v6.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`,
       `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`,
       `https://v5.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`
@@ -112,30 +119,40 @@ function parseTransportRestData(journeys) {
       const trainType = leg.line.productName || 'RJ';
       const trainNumber = leg.line.name || `${trainType} ???`;
       
-      // Try multiple platform fields - WB trains might use different field names
-      const platform = leg.departurePlatform || 
-                      leg.arrivalPlatform || 
-                      leg.platform || 
-                      (leg.departure && leg.departure.platform) ||
-                      (leg.arrival && leg.arrival.platform) ||
-                      (leg.departure && leg.departure.plannedPlatform) ||
-                      (leg.arrival && leg.arrival.plannedPlatform) ||
-                      '?';
+      // Get separate departure and arrival platforms for better display
+      const departurePlatform = leg.departurePlatform || 
+                               (leg.departure && leg.departure.platform) ||
+                               (leg.departure && leg.departure.plannedPlatform) ||
+                               '?';
       
-      // Debug logging for WB trains to see what platform data is available
-      if (trainType === 'WB' && platform === '?') {
-        console.log(`🔍 WB Debug - Available fields:`, {
+      const arrivalPlatform = leg.arrivalPlatform || 
+                             (leg.arrival && leg.arrival.platform) ||
+                             (leg.arrival && leg.arrival.plannedPlatform) ||
+                             '?';
+      
+      // Combined platform display: "5A → 6E" or fallback to single platform
+      let platform;
+      if (departurePlatform !== '?' && arrivalPlatform !== '?') {
+        platform = `${departurePlatform} → ${arrivalPlatform}`;
+      } else if (departurePlatform !== '?') {
+        platform = departurePlatform;
+      } else if (arrivalPlatform !== '?') {
+        platform = arrivalPlatform;
+      } else {
+        platform = '?';
+      }
+      
+      // Enhanced debug logging for missing platform data
+      if (platform === '?') {
+        console.log(`🔍 Missing Platform Debug - Train: ${trainNumber}`, {
+          trainType,
           departurePlatform: leg.departurePlatform,
-          arrivalPlatform: leg.arrivalPlatform, 
+          arrivalPlatform: leg.arrivalPlatform,
           platform: leg.platform,
-          departure: leg.departure ? {
-            platform: leg.departure.platform,
-            plannedPlatform: leg.departure.plannedPlatform
-          } : null,
-          arrival: leg.arrival ? {
-            platform: leg.arrival.platform,
-            plannedPlatform: leg.arrival.plannedPlatform
-          } : null
+          departure: leg.departure,
+          arrival: leg.arrival,
+          origin: leg.origin,
+          destination: leg.destination
         });
       }
       
