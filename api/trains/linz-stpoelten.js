@@ -15,17 +15,45 @@ function parseHafasDateTime(dt) {
 }
 function minutesBetween(later, earlier) { if (!later || !earlier) return 0; return Math.round((later - earlier)/60000); }
 function toClock(date) { return date ? date.toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit', timeZone:'Europe/Vienna'}) : '?'; }
-function normalizeTrainFields({ depReal, depPlan, arrReal, arrPlan, prodName, lineName, platfReal, platfPlan }) {
+function normalizeTrainFields({
+  depReal, depPlan, arrReal, arrPlan,
+  prodName, lineName,
+  platfReal, platfPlan,
+  arrPlatReal, arrPlatPlan
+}) {
   const actualDep = depReal || depPlan;
   const actualArr = arrReal || arrPlan;
-  const delayMin = Math.max(0, minutesBetween(actualDep, depPlan));
+
+  // Delay: prefer dep delay; if not present, fall back to arrival delay
+  let delayMin = 0;
+  if (depPlan && depReal) delayMin = minutesBetween(depReal, depPlan);
+  else if (arrPlan && arrReal) delayMin = minutesBetween(arrReal, arrPlan);
+
   const status = delayMin > 0 ? (delayMin <= 5 ? 'slightly-delayed' : 'delayed') : 'on-time';
-  const depPlat = platfReal || platfPlan || '?';
-  const platform = depPlat;
+
+  // Platform: combine dep and arr if available; else whichever exists
+  const depPlat = platfReal || platfPlan || null;
+  const arrPlat = arrPlatReal || arrPlatPlan || null;
+  let platform = '?';
+  if (depPlat && arrPlat) platform = `${depPlat} → ${arrPlat}`;
+  else if (depPlat) platform = depPlat;
+  else if (arrPlat) platform = arrPlat;
+
   const trainNumber = lineName || prodName || 'RJ ???';
   const trainType = (prodName && prodName.split(' ')[0]) || (trainNumber && trainNumber.split(' ')[0]) || 'RJ';
-  return { departure: toClock(actualDep), arrival: toClock(actualArr), trainType, trainNumber, delay: delayMin, status, platform, _sortA: actualDep };
+
+  return {
+    departure: toClock(actualDep),
+    arrival: toClock(actualArr),
+    trainType,
+    trainNumber,
+    delay: Math.max(0, delayMin),
+    status,
+    platform,
+    _sortA: actualDep
+  };
 }
+
 // ---------------------------------------------------------------------
 
 async function fetchOebbHafasMgate(fromName, toName) {
