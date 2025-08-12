@@ -2,294 +2,205 @@ import axios from 'axios';
 
 let isApiInProgress = false;
 
-async function fetchOebbTransportRest(fromStation, toStation) {
-  if (isApiInProgress) {
-    throw new Error('API call in progress - please wait');
+// Helpers copied from the other file (keep identical) -----------------
+function parseHafasDateTime(dt) {
+  if (!dt) return null;
+  const s = String(dt);
+  let y, m, d, hh = '00', mm = '00';
+  if (s.length === 12) { y = s.slice(0,4); m = s.slice(4,6); d = s.slice(6,8); hh = s.slice(8,10); mm = s.slice(10,12); }
+  else if (s.length === 14) { y = s.slice(0,4); m = s.slice(4,6); d = s.slice(6,8); hh = s.slice(8,10); mm = s.slice(10,12); }
+  else if (s.length === 8) { y = s.slice(0,4); m = s.slice(4,6); d = s.slice(6,8); }
+  else return null;
+  return new Date(`${y}-${m}-${d}T${hh}:${mm}:00`);
+}
+function minutesBetween(later, earlier) { if (!later || !earlier) return 0; return Math.round((later - earlier)/60000); }
+function toClock(date) { return date ? date.toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit', timeZone:'Europe/Vienna'}) : '?'; }
+function normalizeTrainFields({ depReal, depPlan, arrReal, arrPlan, prodName, lineName, platfReal, platfPlan }) {
+  const actualDep = depReal || depPlan;
+  const actualArr = arrReal || arrPlan;
+  const delayMin = Math.max(0, minutesBetween(actualDep, depPlan));
+  const status = delayMin > 0 ? (delayMin <= 5 ? 'slightly-delayed' : 'delayed') : 'on-time';
+  const depPlat = platfReal || platfPlan || '?';
+  const platform = depPlat;
+  const trainNumber = lineName || prodName || 'RJ ???';
+  const trainType = (prodName && prodName.split(' ')[0]) || (trainNumber && trainNumber.split(' ')[0]) || 'RJ';
+  return { departure: toClock(actualDep), arrival: toClock(actualArr), trainType, trainNumber, delay: delayMin, status, platform, _sortA: actualDep };
+}
+// ---------------------------------------------------------------------
+
+async function fetchOebbHafasMgate(fromName, toName) {
+  const AID = process.env.HAFAS_AID;
+  if (!AID) return null;
+
+  const body = {
+    lang: "deu",
+    ver: "1.61",
+    auth: { aid: AID },
+    client: { id: "OEBB", type: "WEB", name: "webapp", v: "1.0" },
+    svcReqL: [{
+      req: {
+        depLocL: [{ name: fromName }],
+        arrLocL: [{ name: toName }],
+        getIST: true,
+        jnyFltrL: [{ type: "PROD", mode: "INC", value: "1111111111111111" }],
+        outFrwd: true,
+        numF: 5
+      },
+      meth: "TripSearch"
+    }],
+    ext: "OEBB.1"
+  };
+
+  const url = 'https://fahrplan.oebb.at/bin/mgate.exe';
+  const res = await axios.post(url, body, {
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+    timeout: 10000
+  });
+
+  const svc = res.data && res.data.svcResL && res.data.svcResL[0];
+  if (!svc || !svc.res || !svc.res.outConL) return [];
+
+  const out = [];
+  for (const con of svc.res.outConL) {
+    if (!con.secL || !con.secL.length) continue;
+    const leg = con.secL[0];
+    const prod = (leg.jny && leg.jny.prod) || {};
+    const dep = leg.dep || {};
+    const arr = leg.arr || {};
+
+    const depPlan = parseHafasDateTime(dep.dTimeS || dep.timeS);
+    const depReal = parseHafasDateTime(dep.dTimeR || dep.timeR);
+    const arrPlan = parseHafasDateTime(arr.aTimeS || arr.timeS);
+    const arrReal = parseHafasDateTime(arr.aTimeR || arr.timeR);
+
+    const platfPlan = (dep.dPlatfS && dep.dPlatfS.txt) || (dep.dPlatfS && dep.dPlatfS.name) || dep.dPlatfS || dep.platfS || null;
+    const platfReal = (dep.dPlatfR && dep.dPlatfR.txt) || (dep.dPlatfR && dep.dPlatfR.name) || dep.dPlatfR || dep.platfR || null;
+
+    const prodName = prod.name;
+    const lineName = leg.name || prod.line || null;
+
+    out.push(normalizeTrainFields({ depReal, depPlan, arrReal, arrPlan, prodName, lineName, platfReal, platfPlan }));
   }
-  
-  isApiInProgress = true;
-  console.log(`🚄 Fetching real ÖBB data: ${fromStation} → ${toStation}`);
-  
+
+  out.sort((a, b) => (a._sortA?.getTime?.() || 0) - (b._sortA?.getTime?.() || 0));
+  return out.slice(0, 3).map(({ _sortA, ...t }) => t);
+}
+
+async function fetchOebbTransportRestOrQuery(fromStation, toStation) {
+  let fromId, toId;
+  if (fromStation === 'St. Pölten' && toStation === 'Linz') {
+    fromId = '8100008';
+    toId = '8100013';
+  } else {
+    fromId = '8100013';
+    toId = '8100008';
+  }
+
+  const currentDate = new Date().toISOString().split('T')[0].replace(/-/g, '');
+  const currentTime = new Date().toTimeString().slice(0,5).replace(':', '');
+
+  const apis = [
+    `https://fahrplan.oebb.at/bin/query.exe/dny?S=Linz+Hbf&Z=St.+P%C3%B6lten+Hbf&date=${currentDate}&time=${currentTime}&start=1&prod=1111111111111111&REQ0JourneyStopsS0A=1&REQ0JourneyStopsZ0A=1&output=json`,
+    `https://v6.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`,
+    `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`,
+    `https://v5.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`
+  ];
+
+  let response = null;
+  for (const apiUrl of apis) {
+    try {
+      const r = await axios.get(apiUrl, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }, timeout: 10000 });
+      if (r.data && (r.data.journeys || r.data.routes)) {
+        response = { data: r.data, apiUsed: apiUrl };
+        break;
+      }
+    } catch {}
+  }
+  if (!response) throw new Error('All APIs failed');
+
+  return parseTransportRestData(response.data);
+}
+
+function parseTransportRestData(journeysContainer) {
   try {
-    let fromId, toId;
-    
-    if (fromStation === 'St. Pölten' && toStation === 'Linz') {
-      fromId = '8100008'; // St. Pölten Hbf
-      toId = '8100013';   // Linz/Donau Hbf
-    } else {
-      fromId = '8100013'; // Linz/Donau Hbf
-      toId = '8100008';   // St. Pölten Hbf
+    const journeys = journeysContainer.journeys || journeysContainer.routes || [];
+    const trains = [];
+    for (const journey of journeys) {
+      if (!journey.legs || journey.legs.length === 0) continue;
+      const leg = journey.legs[0];
+      if (!leg || !leg.line) continue;
+
+      const actualDepartureDate = new Date(leg.departure);
+      const plannedDepartureDate = new Date(leg.plannedDeparture || leg.departure);
+      const arrivalDate = new Date(leg.arrival);
+
+      const departureTime = toClock(actualDepartureDate);
+      const arrivalTime = toClock(arrivalDate);
+
+      const delaySec = leg.departureDelay || 0;
+      const delay = Math.floor(delaySec / 60);
+      const status = delay > 0 ? (delay <= 5 ? 'slightly-delayed' : 'delayed') : 'on-time';
+
+      const trainType = leg.line.productName || 'RJ';
+      const trainNumber = leg.line.name || `${trainType} ???`;
+
+      const departurePlatform =
+        leg.departurePlatform ||
+        (leg.departure && leg.departure.platform) ||
+        (leg.departure && leg.departure.plannedPlatform) || null;
+
+      const arrivalPlatform =
+        leg.arrivalPlatform ||
+        (leg.arrival && leg.arrival.platform) ||
+        (leg.arrival && leg.arrival.plannedPlatform) || null;
+
+      let platform = '?';
+      if (departurePlatform && arrivalPlatform) platform = `${departurePlatform} → ${arrivalPlatform}`;
+      else if (departurePlatform) platform = departurePlatform;
+      else if (arrivalPlatform) platform = arrivalPlatform;
+
+      trains.push({ departure: departureTime, arrival: arrivalTime, trainType, trainNumber, delay, status, platform, _sortA: actualDepartureDate });
     }
-    
-    // Try multiple APIs in order
-    // Enhanced API priority: try ÖBB endpoints first for better Westbahn platform data
-    const currentDate = new Date().toISOString().split('T')[0].replace(/-/g, ''); // YYYYMMDD
-    const currentTime = new Date().toTimeString().split(' ')[0].substring(0,5).replace(':', ''); // HHMM
-    
-    const apis = [
-      // Try direct ÖBB Scotty API for better WB data
-      `https://fahrplan.oebb.at/bin/query.exe/dny?S=Linz+Hbf&Z=St.+P%C3%B6lten+Hbf&date=${currentDate}&time=${currentTime}&start=1&prod=1111111111111111&REQ0JourneyStopsS0A=1&REQ0JourneyStopsZ0A=1&output=json`,
-      // Fallback to transport.rest APIs
-      `https://v6.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`,
-      `https://oebb.macistry.com/api/journeys?from=${fromId}&to=${toId}`,
-      `https://v5.db.transport.rest/journeys?from=${fromId}&to=${toId}&results=5`
-    ];
-    
-    let response = null;
-    let apiUsed = '';
-    
-    for (const apiUrl of apis) {
-      try {
-        console.log(`🌐 Trying API: ${apiUrl}`);
-        response = await axios.get(apiUrl, {
-          headers: {
-            'Accept': 'application/json',
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-          },
-          timeout: 10000
-        });
-        
-        if (response.data && (response.data.journeys || response.data.routes)) {
-          apiUsed = apiUrl;
-          console.log(`✅ API success: ${apiUrl}`);
-          break;
-        }
-      } catch (err) {
-        console.log(`❌ API failed: ${apiUrl} - ${err.message}`);
-        continue;
-      }
-    }
-    
-    if (!response) {
-      throw new Error('All APIs failed');
-    }
-    
-    console.log(`📨 API response: ${response.data ? JSON.stringify(response.data).length : 0} chars`);
-    
-    if (response.data && (response.data.journeys || response.data.routes)) {
-      const journeys = response.data.journeys || response.data.routes || [];
-      const trains = parseTransportRestData(journeys, apiUsed);
-      if (trains && trains.length > 0) {
-        console.log(`✅ Successfully parsed ${trains.length} real trains from ${apiUsed}`);
-        return trains;
-      }
-    }
-    
-    throw new Error('No journey data found in API response');
-    
-  } catch (error) {
-    console.error(`❌ ÖBB Transport REST API failed: ${error.message}`);
-    throw error;
+    trains.sort((a, b) => (a._sortA?.getTime?.() || 0) - (b._sortA?.getTime?.() || 0));
+    return trains.slice(0,3).map(({ _sortA, ...t }) => t);
+  } catch (e) {
+    console.error('❌ Error parsing Transport REST/Scotty data:', e);
+    return [];
+  }
+}
+
+async function fetchOebb(fromStation, toStation) {
+  if (isApiInProgress) throw new Error('API call in progress - please wait');
+  isApiInProgress = true;
+  try {
+    const mgate = await fetchOebbHafasMgate('Linz Hbf', 'St. Pölten Hbf');
+    if (mgate && mgate.length) return mgate;
+    return await fetchOebbTransportRestOrQuery(fromStation, toStation);
   } finally {
     isApiInProgress = false;
   }
 }
 
-function parseTransportRestData(journeys) {
-  try {
-    console.log(`🔍 Parsing ${journeys.length} journeys from Transport REST API`);
-    
-    const trains = [];
-    
-    for (const journey of journeys) {
-      if (!journey.legs || journey.legs.length === 0) continue;
-      
-      const leg = journey.legs[0]; // First leg is the direct train
-      if (!leg.line || !leg.departure || !leg.arrival) continue;
-      
-      // Parse actual departure time (including delays)
-      const actualDepartureDate = new Date(leg.departure);
-      const plannedDepartureDate = new Date(leg.plannedDeparture || leg.departure);
-      
-      const departureTime = actualDepartureDate.toLocaleTimeString('de-DE', {
-        hour: '2-digit',
-        minute: '2-digit',
-        timeZone: 'Europe/Vienna'
-      });
-      
-      const arrivalTime = new Date(leg.arrival).toLocaleTimeString('de-DE', {
-        hour: '2-digit',
-        minute: '2-digit',
-        timeZone: 'Europe/Vienna'
-      });
-      
-      const delay = leg.departureDelay || 0;
-      const status = delay > 0 ? (delay <= 5 ? 'slightly-delayed' : 'delayed') : 'on-time';
-      
-      const trainType = leg.line.productName || 'RJ';
-      const trainNumber = leg.line.name || `${trainType} ???`;
-      
-      // Get separate departure and arrival platforms for better display
-      const departurePlatform = leg.departurePlatform || 
-                               (leg.departure && leg.departure.platform) ||
-                               (leg.departure && leg.departure.plannedPlatform) ||
-                               '?';
-      
-      const arrivalPlatform = leg.arrivalPlatform || 
-                             (leg.arrival && leg.arrival.platform) ||
-                             (leg.arrival && leg.arrival.plannedPlatform) ||
-                             '?';
-      
-      // Combined platform display: "5A → 6E" or fallback to single platform
-      let platform;
-      if (departurePlatform !== '?' && arrivalPlatform !== '?') {
-        platform = `${departurePlatform} → ${arrivalPlatform}`;
-      } else if (departurePlatform !== '?') {
-        platform = departurePlatform;
-      } else if (arrivalPlatform !== '?') {
-        platform = arrivalPlatform;
-      } else {
-        platform = '?';
-      }
-      
-      // Enhanced debug logging for missing platform data
-      if (platform === '?') {
-        console.log(`🔍 Missing Platform Debug - Train: ${trainNumber}`, {
-          trainType,
-          departurePlatform: leg.departurePlatform,
-          arrivalPlatform: leg.arrivalPlatform,
-          platform: leg.platform,
-          departure: leg.departure,
-          arrival: leg.arrival,
-          origin: leg.origin,
-          destination: leg.destination
-        });
-      }
-      
-      trains.push({
-        departure: departureTime,
-        arrival: arrivalTime,
-        trainType: trainType,
-        trainNumber: trainNumber,
-        delay: Math.floor(delay / 60), // Convert seconds to minutes
-        status: status,
-        platform: platform,
-        actualDepartureTime: actualDepartureDate, // For sorting
-        plannedDepartureTime: plannedDepartureDate
-      });
-      
-      console.log(`✅ Parsed: ${trainNumber} planned:${plannedDepartureDate.toLocaleTimeString('de-DE', {hour:'2-digit',minute:'2-digit'})} actual:${departureTime} (${Math.floor(delay / 60)}min delay)`);
-    }
-    
-    // Sort by actual departure time (planned + delay)
-    trains.sort((a, b) => a.actualDepartureTime.getTime() - b.actualDepartureTime.getTime());
-    
-    // Remove sorting fields and return only first 3
-    const sortedTrains = trains.slice(0, 3).map(train => {
-      const { actualDepartureTime, plannedDepartureTime, ...cleanTrain } = train;
-      return cleanTrain;
-    });
-    
-    console.log(`📊 Sorted ${sortedTrains.length} trains by actual departure time`);
-    
-    return sortedTrains;
-    
-  } catch (error) {
-    console.error('❌ Error parsing Transport REST data:', error);
-    return [];
-  }
-}
-
-function getRealisticFallback(fromStation, toStation) {
-  console.log(`🚂 Realistic ÖBB fallback: ${fromStation} → ${toStation}`);
-  
-  const now = new Date();
-  const currentHour = now.getHours();
-  const currentMinute = now.getMinutes();
-  
-  const trains = [];
-  
-  if (fromStation === 'St. Pölten' && toStation === 'Linz') {
-    // St. Pölten → Linz schedule
-    const baseSchedule = [
-      { hour: 6, minute: 42, type: 'RJ', number: 'RJ 540' },
-      { hour: 7, minute: 42, type: 'RJ', number: 'RJ 542' },
-      { hour: 8, minute: 42, type: 'RJ', number: 'RJ 544' },
-      { hour: 9, minute: 42, type: 'RJ', number: 'RJ 546' },
-      { hour: 10, minute: 42, type: 'RJ', number: 'RJ 548' },
-      { hour: 11, minute: 42, type: 'RJ', number: 'RJ 550' },
-      { hour: 12, minute: 12, type: 'WB', number: 'WB 8652' },
-      { hour: 12, minute: 42, type: 'RJ', number: 'RJ 552' },
-      { hour: 13, minute: 12, type: 'WB', number: 'WB 8654' },
-      { hour: 13, minute: 42, type: 'RJ', number: 'RJ 554' },
-      { hour: 14, minute: 12, type: 'WB', number: 'WB 8656' },
-      { hour: 14, minute: 42, type: 'RJ', number: 'RJ 556' },
-      { hour: 15, minute: 42, type: 'RJ', number: 'RJ 558' },
-      { hour: 16, minute: 12, type: 'WB', number: 'WB 8658' },
-      { hour: 16, minute: 42, type: 'RJ', number: 'RJ 560' },
-      { hour: 17, minute: 12, type: 'WB', number: 'WB 8660' },
-      { hour: 17, minute: 42, type: 'RJ', number: 'RJ 562' },
-      { hour: 18, minute: 12, type: 'WB', number: 'WB 8662' },
-      { hour: 18, minute: 42, type: 'RJ', number: 'RJ 564' },
-      { hour: 19, minute: 12, type: 'WB', number: 'WB 8664' },
-      { hour: 19, minute: 42, type: 'RJ', number: 'RJ 566' },
-      { hour: 20, minute: 12, type: 'WB', number: 'WB 8666' },
-      { hour: 20, minute: 42, type: 'RJ', number: 'RJ 568' },
-      { hour: 21, minute: 42, type: 'RJ', number: 'RJ 570' },
-      { hour: 22, minute: 42, type: 'RJ', number: 'RJ 572' }
-    ];
-    
-    for (const schedule of baseSchedule) {
-      const trainTime = schedule.hour * 60 + schedule.minute;
-      const nowTime = currentHour * 60 + currentMinute;
-      
-      if (trainTime > nowTime && trains.length < 3) {
-        const delay = Math.random() < 0.3 ? Math.floor(Math.random() * 8) : 0;
-        const departureTime = `${schedule.hour.toString().padStart(2, '0')}:${schedule.minute.toString().padStart(2, '0')}`;
-        const arrivalHour = schedule.hour + 1;
-        const arrivalMinute = schedule.minute + 11;
-        const adjustedArrivalHour = arrivalMinute >= 60 ? arrivalHour + 1 : arrivalHour;
-        const adjustedArrivalMinute = arrivalMinute >= 60 ? arrivalMinute - 60 : arrivalMinute;
-        const arrivalTime = `${adjustedArrivalHour.toString().padStart(2, '0')}:${adjustedArrivalMinute.toString().padStart(2, '0')}`;
-        
-        trains.push({
-          departure: departureTime,
-          arrival: arrivalTime,
-          trainType: schedule.type,
-          trainNumber: schedule.number,
-          delay: delay,
-          status: delay > 0 ? 'delayed' : 'on-time',
-          platform: schedule.type === 'WB' ? '1' : '2'
-        });
-        
-        console.log(`🚂 Fallback: ${schedule.number} ${departureTime} (${delay}min delay)`);
-      }
-    }
-  }
-  
-  return trains;
-}
-
-// Vercel serverless function handler
 export default async function handler(req, res) {
-  // Enable CORS
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version');
-  
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
-  }
-  
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+
   console.log('🚄 Vercel API Request: Linz → St. Pölten');
-  
   try {
-    const trains = await fetchOebbTransportRest('Linz', 'St. Pölten');
-    
+    const trains = await fetchOebb('Linz', 'St. Pölten');
     res.status(200).json({
       route: "Linz → St. Pölten",
       timestamp: new Date().toISOString(),
-      trains: trains,
-      source: 'oebb-transport-rest-vercel',
+      trains,
+      source: trains && trains.length ? 'oebb-hafas-mgate|query+transport.rest' : 'unknown',
       realTimeData: true,
       success: true
     });
-    
   } catch (error) {
-    console.error(`❌ Transport REST API failed: ${error.message}`);
-    
+    console.error(`❌ API failed: ${error.message}`);
     res.status(500).json({
       route: "Linz → St. Pölten",
       timestamp: new Date().toISOString(),
